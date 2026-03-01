@@ -27,15 +27,15 @@ description: Access 1000s of tools through Arcade's MCP runtime for AI agents, w
 Install the Arcade JavaScript client and LangChain dependencies.
 
 ```bash
-npm install @arcadeai/arcadejs @langchain/core @langchain/openai @langchain/langgraph
+npm install @arcadeai/arcadejs @langchain/core @langchain/openai @langchain/langgraph zod
 ```
 
 Or using other package managers:
 
 ```bash
-yarn add @arcadeai/arcadejs @langchain/core @langchain/openai @langchain/langgraph
+yarn add @arcadeai/arcadejs @langchain/core @langchain/openai @langchain/langgraph zod
 # or
-pnpm add @arcadeai/arcadejs @langchain/core @langchain/openai @langchain/langgraph
+pnpm add @arcadeai/arcadejs @langchain/core @langchain/openai @langchain/langgraph zod
 ```
 
 ### Credentials
@@ -165,11 +165,13 @@ async function arcadeToLangchain(
                 user_id: userId,
             });
 
-            if (response.output?.value) {
+            if (response.output?.error || response.success === false) {
+                return { error: response.output?.error?.message ?? 'Tool execution failed' };
+            }
+            if (response.output) {
                 return response.output.value;
             }
-
-            return { error: 'Tool execution failed' };
+            return { error: 'Tool execution returned no output' };
         },
         {
             name: arcadeTool.qualified_name.replace(/\./g, '_'),
@@ -204,7 +206,7 @@ async function getArcadeTools(options: {
     // Get specific tools by name
     if (tools) {
         const responses = await Promise.all(
-            tools.map(toolName => arcadeClient.tools.get({ name: toolName }))
+            tools.map(toolName => arcadeClient.tools.get(toolName))
         );
         for (const response of responses) {
             toolDefinitions.set(response.fully_qualified_name, response);
