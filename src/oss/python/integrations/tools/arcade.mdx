@@ -1,0 +1,415 @@
+---
+title: "Arcade integration"
+description: Access 1000s of tools through Arcade's MCP runtime for AI agents, with automatic OAuth handling, secure token management, and production-ready multi-user support.
+---
+
+[Arcade](https://arcade.dev) is the leading MCP runtime that enables AI agents to take real-world actions securely at scale. It handles OAuth automatically, manages user tokens securely, and provides access to 1000s of tools across Gmail, Slack, GitHub, Google Sheets, Notion, Stripe, and many more services. As a native MCP server, Arcade works seamlessly with any MCP-compatible client including LangChain, LangGraph, Claude Desktop, Cursor, and VS Code.
+
+## Overview
+
+### Integration details
+
+| Class | Package | Serializable | [JS support](/oss/integrations/tools/arcade) | Version |
+|:---|:---|:---:|:---:|:---:|
+| Arcade | [arcadepy](https://pypi.org/project/arcadepy/) | ❌ | ✅ | ![PyPI - Version](https://img.shields.io/pypi/v/arcadepy?style=flat-square&label=%20) |
+
+### Tool features
+
+- **1000s of Tools**: Production-ready integrations for Gmail, Slack, GitHub, Google Sheets, Notion, Linear, Stripe, HubSpot, Jira, and many more
+- **Automatic OAuth**: Handles complex OAuth flows and token refresh automatically - no auth code required
+- **Native MCP Protocol**: Works with any MCP client (LangChain, Claude Desktop, Cursor, VS Code, and more)
+- **Production Multi-User**: Enterprise-grade per-user authentication with secure token storage
+- **Custom Tools**: Extend with your own APIs and internal tools via the Arcade SDK
+- **Framework Agnostic**: Integrates with LangChain, LangGraph, OpenAI Agents, CrewAI, Vercel AI, and more
+
+## Setup
+
+Install the Arcade Python client and LangChain dependencies.
+
+<CodeGroup>
+```python pip
+pip install -U arcadepy langchain langchain-openai langgraph
+```
+```python uv
+uv add arcadepy langchain langchain-openai langgraph
+```
+</CodeGroup>
+
+### Credentials
+
+Sign up at [arcade.dev](https://arcade.dev) to get your API key. Arcade offers a generous free tier to get started.
+
+```python Set API key icon="key"
+import getpass
+import os
+
+if not os.environ.get("ARCADE_API_KEY"):
+    os.environ["ARCADE_API_KEY"] = getpass.getpass("Enter your Arcade API key: ")
+```
+
+Set up [LangSmith](/langsmith/home) for tracing:
+
+```python Enable tracing icon="flask"
+# os.environ["LANGSMITH_API_KEY"] = getpass.getpass("Enter your LangSmith API key: ")
+# os.environ["LANGSMITH_TRACING"] = "true"
+```
+
+## Instantiation
+
+Initialize the Arcade client and fetch tools from specific toolkits or MCP servers. Each toolkit represents a service (e.g., Gmail, Slack) with multiple tools (actions you can perform).
+
+```python Initialize Arcade icon="robot"
+import asyncio
+from arcadepy import AsyncArcade
+
+# Initialize Arcade client
+arcade = AsyncArcade()
+
+# Get tools from specific toolkits
+tools = await arcade.tools.list(toolkit="Gmail", limit=30)
+
+print(f"Loaded {len(tools.items)} tools from Gmail toolkit")
+```
+
+### Available toolkits
+
+Arcade provides toolkits for various services:
+
+**Productivity**: Google Sheets, Google Docs, Google Slides, Google Drive, Jira, Confluence, Notion, Linear, Asana, Dropbox, Outlook
+**Communication**: Slack, Gmail, Microsoft Teams, X (Twitter), Reddit
+**Development**: GitHub
+**Sales/Business**: HubSpot
+**Payments**: Stripe
+**Media**: YouTube
+
+## Converting Arcade tools to LangChain
+
+Arcade tools need to be converted to LangChain-compatible @[StructuredTool] objects. Here's a complete conversion utility:
+
+```python Type mapping
+from typing import Any, List
+from pydantic import BaseModel, Field, create_model
+from langchain_core.tools import StructuredTool
+from langchain_core.runnables import RunnableConfig
+from arcadepy import AsyncArcade
+from arcadepy.types import ToolDefinition
+
+TYPE_MAPPING = {
+    "string": str,
+    "number": float,
+    "integer": int,
+    "boolean": bool,
+    "array": list,
+    "json": dict,
+}
+
+def get_python_type(val_type: str) -> Any:
+    _type = TYPE_MAPPING.get(val_type)
+    if _type is None:
+        raise ValueError(f"Invalid value type: {val_type}")
+    return _type
+
+def arcade_schema_to_pydantic(tool_def: ToolDefinition) -> type[BaseModel]:
+    fields: dict[str, Any] = {}
+    for param in tool_def.input.parameters or []:
+        param_type = get_python_type(param.value_schema.val_type)
+        if param_type is list and param.value_schema.inner_val_type:
+            inner_type = get_python_type(param.value_schema.inner_val_type)
+            param_type = list[inner_type]
+        param_description = param.description or "No description"
+        default = ... if param.required else None
+        fields[param.name] = (
+            param_type,
+            Field(default=default, description=param_description),
+        )
+    return create_model(f"{tool_def.name}Args", **fields)
+```
+
+```python Convert Arcade tools to LangChain
+async def arcade_to_langchain(
+    arcade_client: AsyncArcade,
+    arcade_tool: ToolDefinition,
+) -> StructuredTool:
+    args_schema = arcade_schema_to_pydantic(arcade_tool)
+
+    async def tool_function(config: RunnableConfig, **kwargs: Any) -> Any:
+        user_id = config.get("configurable", {}).get("user_id") if config else None
+        if not user_id:
+            raise ValueError("User ID required for Arcade tools")
+
+        # Check authorization status
+        auth_response = await arcade_client.tools.authorize(
+            tool_name=arcade_tool.qualified_name,
+            user_id=user_id
+        )
+
+        if auth_response.status != "completed":
+            # Return authorization URL for user to complete
+            return {
+                "authorization_required": True,
+                "auth_url": auth_response.url,
+                "auth_id": auth_response.id
+            }
+
+        # Execute the tool
+        filtered_kwargs = {k: v for k, v in kwargs.items() if v is not None}
+        response = await arcade_client.tools.execute(
+            tool_name=arcade_tool.qualified_name,
+            input=filtered_kwargs,
+            user_id=user_id,
+        )
+
+        if (response.output is not None and response.output.error is not None) or response.success is False:
+            error_msg = response.output.error.message if response.output and response.output.error else "Tool execution failed"
+            return {"error": error_msg}
+        if response.output is not None:
+            return response.output.value
+        return {"error": "Tool execution returned no output"}
+
+    return StructuredTool.from_function(
+        coroutine=tool_function,
+        name=arcade_tool.qualified_name.replace(".", "_"),
+        description=arcade_tool.description,
+        args_schema=args_schema
+    )
+```
+
+## Get tools from Arcade
+
+Retrieve tools from specific toolkits or by name:
+
+```python Get tools helper
+async def get_arcade_tools(
+    arcade_client: AsyncArcade | None = None,
+    toolkits: List[str] | None = None,
+    tools: List[str] | None = None,
+    tool_limit: int = 30,
+) -> List[StructuredTool]:
+    if not arcade_client:
+        arcade_client = AsyncArcade()
+
+    if not tools and not toolkits:
+        raise ValueError("Provide either tools or toolkits")
+
+    tool_definitions: dict[str, ToolDefinition] = {}
+
+    # Get specific tools by name
+    if tools:
+        tasks = [arcade_client.tools.get(name=tool_name) for tool_name in tools]
+        responses = await asyncio.gather(*tasks)
+        for response in responses:
+            tool_definitions[response.fully_qualified_name] = response
+
+    # Get all tools from toolkits
+    if toolkits:
+        tasks = [
+            arcade_client.tools.list(toolkit=toolkit, limit=tool_limit)
+            for toolkit in toolkits
+        ]
+        responses = await asyncio.gather(*tasks)
+        for response in responses:
+            for tool in response.items:
+                tool_definitions[tool.fully_qualified_name] = tool
+
+    # Convert to LangChain tools
+    tasks = [
+        arcade_to_langchain(arcade_client, tool_def)
+        for tool_def in tool_definitions.values()
+    ]
+    return await asyncio.gather(*tasks)
+```
+
+### Get tools from multiple toolkits
+
+```python
+# Get tools from multiple toolkits
+tools = await get_arcade_tools(
+    toolkits=["Gmail", "Slack", "GitHub"]
+)
+```
+
+### Get specific tools
+
+```python
+# Get specific tools by name
+tools = await get_arcade_tools(
+    tools=["Gmail_ListEmails", "Gmail_SendEmail", "Slack_SendMessage"]
+)
+```
+
+## Use within an agent
+
+Here's a complete example using Arcade tools with a LangGraph agent:
+
+<ChatModelTabs customVarName="llm" />
+
+```python
+import os
+import getpass
+
+if not os.environ.get("OPENAI_API_KEY"):
+    os.environ["OPENAI_API_KEY"] = getpass.getpass("Enter your OpenAI API key: ")
+```
+
+```python
+# | output: false
+# | echo: false
+
+from langchain.chat_models import init_chat_model
+
+llm = init_chat_model(model="gpt-4o", model_provider="openai")
+```
+
+```python Agent with Arcade tools icon="robot"
+import asyncio
+from arcadepy import AsyncArcade
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
+from langgraph.checkpoint.memory import MemorySaver
+
+async def main():
+    # Initialize Arcade
+    arcade = AsyncArcade()
+
+    # Get Gmail tools
+    tools = await get_arcade_tools(
+        arcade_client=arcade,
+        tools=["Gmail_ListEmails", "Gmail_SendEmail"]
+    )
+
+    # Create model
+    model = ChatOpenAI(model="gpt-4o")
+
+    # Create agent with memory
+    memory = MemorySaver()
+    agent = create_react_agent(
+        model=model,
+        tools=tools,
+        checkpointer=memory
+    )
+
+    # Configure with user ID for authorization
+    config = {
+        "configurable": {
+            "thread_id": "email_thread",
+            "user_id": "user@example.com"
+        }
+    }
+
+    # Run the agent
+    result = await agent.ainvoke(
+        {"messages": [{"role": "user", "content": "List my latest 3 emails"}]},
+        config=config
+    )
+
+    print(result["messages"][-1].content)
+
+asyncio.run(main())
+```
+
+## Authentication handling
+
+Arcade manages OAuth flows for you. When a tool requires authorization, you'll receive an auth URL:
+
+```python
+from arcadepy import Arcade
+
+arcade = Arcade()
+user_id = "user@example.com"
+
+# Start authorization for a provider
+auth_response = arcade.auth.start(
+    user_id=user_id,
+    provider="google",
+    scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+)
+
+if auth_response.status != "completed":
+    print("Please authorize the application:")
+    print(auth_response.url)
+
+# Wait for user to complete authorization
+auth_response = arcade.auth.wait_for_completion(auth_response)
+print("Authorization completed!")
+```
+
+## Using with LangChain tools directly
+
+You can also use Arcade to get OAuth tokens and use them with existing LangChain tool integrations:
+
+```python
+from arcadepy import Arcade
+from google.oauth2.credentials import Credentials
+from langchain_google_community import GmailToolkit
+from langchain_google_community.gmail.utils import build_resource_service
+
+# Get token from Arcade
+arcade = Arcade()
+auth_response = arcade.auth.start(
+    user_id="user@example.com",
+    provider="google",
+    scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+)
+
+if auth_response.status != "completed":
+    print(f"Authorize at: {auth_response.url}")
+    auth_response = arcade.auth.wait_for_completion(auth_response)
+
+# Use token with LangChain Gmail toolkit
+creds = Credentials(auth_response.context.token)
+api_resource = build_resource_service(credentials=creds)
+toolkit = GmailToolkit(api_resource=api_resource)
+tools = toolkit.get_tools()
+```
+
+## Multi-user scenarios
+
+Arcade handles per-user authentication automatically:
+
+```python
+# Tools are shared — user identity is provided at invocation time via RunnableConfig
+tools = await get_arcade_tools(toolkits=["Gmail"])
+
+# Create agents with shared tools
+agent_1 = create_react_agent(model, tools)
+agent_2 = create_react_agent(model, tools)
+
+# User identity is passed through config at invocation time
+config_user_1 = {"configurable": {"thread_id": "u1", "user_id": "user_1@example.com"}}
+config_user_2 = {"configurable": {"thread_id": "u2", "user_id": "user_2@example.com"}}
+
+result_1 = await agent_1.ainvoke(
+    {"messages": [{"role": "user", "content": "List my emails"}]},
+    config=config_user_1
+)
+result_2 = await agent_2.ainvoke(
+    {"messages": [{"role": "user", "content": "List my emails"}]},
+    config=config_user_2
+)
+```
+
+## Advanced features
+
+### Custom tools
+
+To create custom tools, build an MCP server with the [`arcade_mcp_server` package](https://docs.arcade.dev/en/guides/create-tools/tool-basics/build-mcp-server). The LangChain integration here consumes existing tools via `tools.get` and `tools.list` — custom tool creation is handled separately through the Arcade MCP server framework.
+
+### MCP server integration
+
+Arcade works as an MCP server, making it compatible with any MCP client:
+
+```python
+# Use Arcade as an MCP server URL
+# Configure in your MCP client settings:
+# URL: https://api.arcade.dev/v1/mcp
+# Headers: Authorization: Bearer YOUR_ARCADE_API_KEY
+```
+
+---
+
+## API reference
+
+For detailed documentation of all Arcade features and configurations, visit:
+- [Arcade Documentation](https://docs.arcade.dev)
+- [LangChain Integration Guide](https://docs.arcade.dev/en/home/langchain/use-arcade-tools)
+- [Available Tools](https://docs.arcade.dev/en/home)
