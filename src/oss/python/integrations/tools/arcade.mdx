@@ -28,10 +28,10 @@ Install the Arcade Python client and LangChain dependencies.
 
 <CodeGroup>
 ```python pip
-pip install -U arcadepy langchain langchain-openai
+pip install -U arcadepy langchain langchain-openai langgraph
 ```
 ```python uv
-uv add arcadepy langchain langchain-openai
+uv add arcadepy langchain langchain-openai langgraph
 ```
 </CodeGroup>
 
@@ -159,10 +159,12 @@ async def arcade_to_langchain(
             user_id=user_id,
         )
 
-        if response.output and response.output.value:
+        if (response.output is not None and response.output.error is not None) or response.success is False:
+            error_msg = response.output.error.message if response.output and response.output.error else "Tool execution failed"
+            return {"error": error_msg}
+        if response.output is not None:
             return response.output.value
-
-        return {"error": "Tool execution failed"}
+        return {"error": "Tool execution returned no output"}
 
     return StructuredTool.from_function(
         coroutine=tool_function,
@@ -365,45 +367,32 @@ tools = toolkit.get_tools()
 Arcade handles per-user authentication automatically:
 
 ```python
-# Each user has their own authenticated sessions
-tools_user_1 = await get_arcade_tools(
-    toolkits=["Gmail"],
-    user_id="user_1@example.com"
-)
-tools_user_2 = await get_arcade_tools(
-    toolkits=["Gmail"],
-    user_id="user_2@example.com"
-)
+# Tools are shared — user identity is provided at invocation time via RunnableConfig
+tools = await get_arcade_tools(toolkits=["Gmail"])
 
-# Tools will use the respective user's credentials
-agent_1 = create_react_agent(model, tools_user_1)
-agent_2 = create_react_agent(model, tools_user_2)
+# Create agents with shared tools
+agent_1 = create_react_agent(model, tools)
+agent_2 = create_react_agent(model, tools)
+
+# User identity is passed through config at invocation time
+config_user_1 = {"configurable": {"thread_id": "u1", "user_id": "user_1@example.com"}}
+config_user_2 = {"configurable": {"thread_id": "u2", "user_id": "user_2@example.com"}}
+
+result_1 = await agent_1.ainvoke(
+    {"messages": [{"role": "user", "content": "List my emails"}]},
+    config=config_user_1
+)
+result_2 = await agent_2.ainvoke(
+    {"messages": [{"role": "user", "content": "List my emails"}]},
+    config=config_user_2
+)
 ```
 
 ## Advanced features
 
 ### Custom tools
 
-Create custom tools using the Arcade SDK:
-
-```python
-from arcadepy import Arcade
-
-arcade = Arcade()
-
-# Register a custom tool
-custom_tool = arcade.tools.define(
-    name="MyCustomTool",
-    description="A custom tool for my application",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "Search query"}
-        },
-        "required": ["query"]
-    }
-)
-```
+To create custom tools, build an MCP server with the [`arcade_mcp_server` package](https://docs.arcade.dev/en/guides/create-tools/tool-basics/build-mcp-server). The LangChain integration here consumes existing tools via `tools.get` and `tools.list` — custom tool creation is handled separately through the Arcade MCP server framework.
 
 ### MCP server integration
 
